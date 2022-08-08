@@ -91,6 +91,13 @@ class Time:
         end_hour = int(self.end/60)
         end_minute = self.end % 60
         days = "undefinded days"
+        match self.session:
+            case 0:
+                session = "A"
+            case 1:
+                session = "B"
+            case 2:
+                session = "AB"
         match self.days:
             case 0:
                 days = "MW"
@@ -98,7 +105,8 @@ class Time:
                 days = "TTh"
             case 2:
                 days = "MTWTh"
-        return "{}:{} to {}:{} on {}".format(start_hour,start_minute,end_hour,end_minute,days)
+        return "{}:{} to {}:{} on {}, session {}"\
+          .format(start_hour,start_minute,end_hour,end_minute,days,session)
 
 class Section:
     # time is Time object, created beforehand
@@ -184,11 +192,13 @@ class Prof_List:
     def __init__(self):
         self.names = []
         self.bad_rooms = []
+        self.avoid_bad_rooms_by_splitting_gaps = []
 
     def add_name(self, name: str):
         if name not in self.names:
             self.names.append(name)
             self.bad_rooms.append([])
+            self.avoid_bad_rooms_by_splitting_gaps.append(True)
 
     def get_id(self, name: str) -> int:
         return self.names.index(name)
@@ -226,6 +236,10 @@ class Schedule:
         # and find gaps, initialize score
         self.unroomed_sects = copy.copy(sects)
         self.rooms = {}
+        self.sects_in_bad_rooms = [] # one measure of how bad a finished schedule is
+        self.split_in_person_gaps = []  # one measure of how bad a finished schedule is
+        # sections that were part of a gap that were kicked out of the room the gap was in.
+        self.online_sects_kicked = [] 
         room_nums = projectors.keys()
         for n in room_nums:
             self.rooms[n] = []
@@ -253,20 +267,20 @@ class Schedule:
                 if s_first_gaps != []:
                     shortest = min(s_first_gaps, key = lambda g: g.length)
                     for g in s_first_gaps:
-                        g_second_days_subset_of_s_second_days =\
-                          shortest.second.time.days == g.second.time.days or\
-                          shortest.second.time.days == 2
-                        if g != shortest and g_second_days_subset_of_s_second_days:
+                        g_second_days_subset_of_sh_second_days =\
+                          (shortest.second.time.days == g.second.time.days or\
+                          shortest.second.time.days == 2) and\
+                          shortest.second.time.session + g.second.time.session != 1
+                          # This feels hacky and I'm not sure it's always corect...
+                        if g != shortest and g_second_days_subset_of_sh_second_days:
                             p_gaps.remove(g)
             self.gaps.extend(p_gaps)
         for g in self.gaps:
             done_with_g = False
             for p in self.gaps_partition:
                 for f in p:
-                    if prof_list.names[g.first.prof] == "Wono, K" and prof_list.names[f.first.prof] == "Wono, K":
-                        pass
-                    if f.first == g.second or f.second == g.first: # or f.first == g.first or f.second == g.second:
-                        # warning: it is theoretically possible to have groups separate that should be together.
+                    if f.first == g.second or f.second == g.first or\
+                       f.first == g.first or f.second == g.second:
                         p.append(g)
                         done_with_g = True
                         break
@@ -279,24 +293,148 @@ class Schedule:
         for p, q in it.combinations(self.gaps_partition, 2):
             for pg, qg in it.product(p,q):
                 #for every pair of gaps pg, qg with pg in p and qg in q:
-                if pg.first == qg.second or pg.second == qg.first: # or pg.first == qg.first or pg.second == qg.second:
+                if pg.first == qg.second or pg.second == qg.first or\
+                   pg.first == qg.first or pg.second == qg.second:
                     # make p the union of p and q
                     p.extend(q)
                     self.gaps_partition.remove(q)
             
 
-    def fits_in_room_p(self, sect: Section, room: int) -> bool:
-        # True iff schedule self has space in room for sect
+    def fits_in_room_p(self, sect: Section, room: int) -> bool | list:
+        # Returns True iff sect doesn't overlap with ANY sections in room.
+        # Returns False iff sect overlaps with in-person sections in room.
+        # Returns list of Sects iff sect overplaps with online section(s) in room.
+        overlapping = []
         for s in self.rooms[room]:
             if sect.overlaps_p(s):
-                return False
-        return True
+                if s.online:
+                    overlapping.append(s)
+                else:
+                    return False # sect overlaps with in-person s
+        if overlapping == []:
+            return True
+        else:
+            return overlapping
 
-    def put_gaps_in_a_room(self, gaps: list) -> bool:
-        # Attempts to put all classes from gaps in one room.
-        # gaps must be list of gaps, all for one prof.
-        # returns True if possible, false if not.
-        # If successful, self.rooms, self.gaps, self.unroomed_sects are updated.
+    # def put_gaps_in_a_room(self, gaps: list) -> bool:
+    #     # old version
+    #     # Attempts to put all classes from gaps in one room.
+    #     # gaps must be list of gaps, all for one prof.
+    #     # returns True if possible, false if not.
+    #     # If successful, self.rooms, self.gaps, self.unroomed_sects are updated.
+    #     if gaps == []:
+    #         raise Exception("gaps is empty, ya dingus.")
+    #     g_sects = [g.first for g in gaps] + [g.second for g in gaps]
+    #     g_sects = list(set(g_sects))
+    #     # g_sects now has all sections from gaps with no duplicates
+    #     prof = gaps[0].first.prof
+    #     ok_rooms = [r for r in self.rooms.keys() if r not in prof_list.bad_rooms[prof]]
+    #     random.shuffle(ok_rooms)  # try rooms in random order for extra randomness
+    #     for r in ok_rooms:
+    #         g_sects_fit_in_r = True
+    #         for s in g_sects:
+    #             if not self.fits_in_room_p(s, r):
+    #                 g_sects_fit_in_r = False
+    #                 break
+    #         if g_sects_fit_in_r:
+    #             self.rooms[r].extend(g_sects)
+    #             for s in g_sects:
+    #                 if s in self.unroomed_sects:
+    #                     self.unroomed_sects.remove(s)
+    #             for g in gaps:
+    #                 self.gaps.remove(g)
+    #             return True
+    #     # No room in ok_rooms, so let's try bad rooms.
+    #     if not prof_list.avoid_bad_rooms_by_splitting_gaps[prof]:
+    #         for r in prof_list.bad_rooms[prof]:
+    #             g_sects_fit_in_r = True
+    #             for s in g_sects:
+    #                 if not self.fits_in_room_p(s, r):
+    #                     g_sects_fit_in_r = False
+    #                     break
+    #             if g_sects_fit_in_r:
+    #                 self.rooms[r].extend(g_sects)
+    #                 for s in g_sects:
+    #                     if s in self.unroomed_sects:
+    #                         self.unroomed_sects.remove(s)
+    #                 for g in gaps:
+    #                     self.gaps.remove(g)
+    #                 return True
+    #     # If we got here without returning True, g_sects don't fit in any room
+    #     return False
+
+    # def sub_put_gaps_in_a_room(self, gaps: list, bad_rooms_ok: bool,
+    #                            kick_online_ok: bool, split_gaps_ok: bool) -> bool:
+    # OLD VERSION TO DELETE
+    #     # only to be called by put_gaps_in_a_room()
+    #     # True if successfully completed, otherwise False and nothing is changed.
+    #     # bad_rooms_ok should be True ONLY if you already tried with bad_rooms_ok = False.
+    #     # This function will will not prioritize good rooms when bad_rooms_ok = True.
+    #     if gaps == []:
+    #         raise Exception("gaps is empty, ya dingus.")
+    #     g_sects = [g.first for g in gaps] + [g.second for g in gaps]
+    #     g_sects = list(set(g_sects))
+    #     # g_sects now has all sections from gaps with no duplicates
+    #     prof = gaps[0].first.prof
+    #     ok_rooms = [r for r in self.rooms.keys() if r not in prof_list.bad_rooms[prof]]
+    #     if bad_rooms_ok:
+    #         ok_rooms = list(self.rooms.keys())
+    #     random.shuffle(ok_rooms)  # try rooms in random order for extra randomness
+    #     g_sects_that_dont_fit = {} # keys:rooms. Entries are sections in gaps that don't fit in room 
+    #     online_sects_to_kick = {}  # keys:rooms. Entries are online sections in room that must be kicked
+    #     for n in ok_rooms:
+    #         g_sects_that_dont_fit[n] = []
+    #         online_sects_to_kick[n] = []
+    #     for r in ok_rooms:
+    #         for s in g_sects:
+    #             s_fits_in_r = self.fits_in_room_p(s, r)
+    #             if s_fits_in_r == False:
+    #                 g_sects_that_dont_fit[r].append(s)
+    #             if not kick_online_ok and type(s_fits_in_r) == type([]):
+    #                 g_sects_that_dont_fit[r].append(s)
+    #             if kick_online_ok and type(s_fits_in_r) == type([]):
+    #                 online_sects_to_kick[r].extend(s_fits_in_r)
+    #     # if both kick_online_ok and split_gaps_ok, prioritize no_split_gaps.
+    #     # make list (lsdf) of room numbers tied for least number of sects that don't fit
+    #     # find the chosen_r in lsdf such that online_sects_to_kick[chosen_r] is minimized.
+    #     min_len = min([len(sdf) for sdf in g_sects_that_dont_fit.values()])
+    #     # min_len is the smallest number of sections that don't fit for all rooms
+    #     lsdf = [r for r in g_sects_that_dont_fit.keys() if len(g_sects_that_dont_fit[r]) == min_len]
+    #     # lsdf is list of rooms tied for least number of sects in gaps that don't fit
+    #     chosen_r = lsdf[0]
+    #     for r in lsdf:
+    #         if len(online_sects_to_kick[r]) < len(online_sects_to_kick[chosen_r]):
+    #             chosen_r = r
+    #     # At this point, chosen_r is one of the rooms with the least number of sections in
+    #     # g_sects that don't fit. When two rooms are tied for the least number of sects that
+    #     # don't fit, chosen_r is one of the rooms with least online_sects_to_kick.
+    #     # Most of the time, min_len == 0, and len(online_sects_to_kick[chosen_r] == 0.
+    #     if not split_gaps_ok and len(g_sects_that_dont_fit[chosen_r]) != 0:
+    #         return 
+    def put_gaps_in_a_room(self, gaps: list):
+        if gaps == []:
+            raise Exception("gaps is empty, ya dingus.")
+        prof = gaps[0].first.prof
+        if self.sub_put_gaps_in_a_room(gaps, bad_rooms_ok = False, split_gaps_ok = False):
+            return
+        if prof_list.avoid_bad_rooms_by_splitting_gaps[prof]:
+            self.sub_put_gaps_in_a_room(gaps, bad_rooms_ok = False, split_gaps_ok = True)
+            # It should always be successful with split_gaps_ok so ...
+            return
+        else:
+            if self.sub_put_gaps_in_a_room(gaps, bad_rooms_ok = True, split_gaps_ok = False):
+                return
+            elif self.sub_put_gaps_in_a_room(gaps, bad_rooms_ok = False, split_gaps_ok = True):
+                return
+        # At this point, we've tried split_gaps_ok = True which is always successful
+        return
+        
+        
+    def sub_put_gaps_in_a_room(self, gaps: list, bad_rooms_ok: bool,
+                               split_gaps_ok: bool) -> bool:
+        # True if successfully completed, otherwise False and nothing is changed.
+        # bad_rooms_ok should False; only True when calling recursively.
+        # This function will will not prioritize good rooms when bad_rooms_ok = True.
         if gaps == []:
             raise Exception("gaps is empty, ya dingus.")
         g_sects = [g.first for g in gaps] + [g.second for g in gaps]
@@ -304,39 +442,188 @@ class Schedule:
         # g_sects now has all sections from gaps with no duplicates
         prof = gaps[0].first.prof
         ok_rooms = [r for r in self.rooms.keys() if r not in prof_list.bad_rooms[prof]]
+        if bad_rooms_ok:
+            ok_rooms = list(self.rooms.keys())
         random.shuffle(ok_rooms)  # try rooms in random order for extra randomness
+        g_sects_that_dont_fit = {} # keys:rooms. Entries are sections in gaps that don't fit in room 
+        online_sects_to_kick = {}  # keys:rooms. Entries are online sections in room that must be kicked
+        for n in ok_rooms:
+            g_sects_that_dont_fit[n] = []
+            online_sects_to_kick[n] = []
         for r in ok_rooms:
-            g_sects_fit_in_r = True
             for s in g_sects:
-                if not self.fits_in_room_p(s, r):
-                    g_sects_fit_in_r = False
-                    break
-            if g_sects_fit_in_r:
-                # TODO: add code to put g_sects into r
-                self.rooms[r].extend(g_sects)
-                for s in g_sects:
-                    if s in self.unroomed_sects:
-                        self.unroomed_sects.remove(s)
-                for g in gaps:
-                    self.gaps.remove(g)
-                return True
-        # If we got here without returning True, g_sects don't fit in any room
-        return False
+                s_fits_in_r = self.fits_in_room_p(s, r)
+                if s_fits_in_r == False:
+                    g_sects_that_dont_fit[r].append(s)
+                if type(s_fits_in_r) == type([]):
+                    online_sects_to_kick[r].extend(s_fits_in_r)
+        # if both kick_online_ok and split_gaps_ok, prioritize no_split_gaps.
+        # make list (lsdf) of room numbers tied for least number of sects that don't fit
+        # find the chosen_r in lsdf such that online_sects_to_kick[chosen_r] is minimized.
+        min_len = min([len(sdf) for sdf in g_sects_that_dont_fit.values()])
+        # min_len is the smallest number of sections that don't fit for all rooms
+        lsdf = [r for r in g_sects_that_dont_fit.keys() if len(g_sects_that_dont_fit[r]) == min_len]
+        # lsdf is list of rooms tied for least number of sects in gaps that don't fit
+        chosen_r = lsdf[0]
+        for r in lsdf:
+            if len(online_sects_to_kick[r]) < len(online_sects_to_kick[chosen_r]):
+                chosen_r = r
+        # At this point, chosen_r is one of the rooms with the least number of sections in
+        # g_sects that don't fit. When two rooms are tied for the least number of sects that
+        # don't fit, chosen_r is one of the rooms with least online_sects_to_kick.
+        # Most of the time, min_len == 0, and len(online_sects_to_kick[chosen_r] == 0.
+        if not split_gaps_ok and len(g_sects_that_dont_fit[chosen_r]) != 0:
+            return False
+        for s in online_sects_to_kick:
+            self.online_sects_kicked.append(s)
+            self.rooms[chosen_r].remove(s)
+            self.unroomed_sects.append(s)
+        for s in g_sects_that_dont_fit:
+            split_gaps = []
+            for g in gaps:
+                if (s == g.first or s == g.second) \
+                  and not g.first.online and not g.second.online:
+                    self.split_in_person_gaps.append(s)
+        for s in g_sects:
+            if s not in g_sects_that_dont_fit:
+                self.rooms[chosen_r].append(s)
+                self.unroomed_sects.remove(s)
+        return True
+            
 
+            
+        #     if g_sects_that_dont_fit_in_r == []:
+        #         # r has room for all of g_sects
+        #         for os in online_sects_to_kick:
+        #             self.rooms[r].remove(os)
+        #             self.online_sects_kicked.append(os)
+        #         self.rooms[r].extend(g_sects)
+        #         for s in g_sects:
+        #             if s in self.unroomed_sects:
+        #                 self.unroomed_sects.remove(s)
+        #         for g in gaps:
+        #             self.gaps.remove(g)
+        #         return True
+        # # If we got here without returning True, g_sects don't fit in any room
+        # return False
+        
+    # def put_gaps_in_a_room(self, gaps: list) -> bool:
+    #     # new version
+    #     # Attempts to put all classes from gaps in one room.
+    #     # gaps must be list of gaps, all for one prof.
+    #     # returns True if possible, false if not.
+    #     # If successful, self.rooms, self.gaps, self.unroomed_sects are updated.
+    #     if gaps == []:
+    #         raise Exception("gaps is empty, ya dingus.")
+    #     g_sects = [g.first for g in gaps] + [g.second for g in gaps]
+    #     g_sects = list(set(g_sects))
+    #     # g_sects now has all sections from gaps with no duplicates
+    #     prof = gaps[0].first.prof
+    #     ok_rooms = [r for r in self.rooms.keys() if r not in prof_list.bad_rooms[prof]]
+    #     random.shuffle(ok_rooms)  # try rooms in random order for extra randomness
+    #     for r in ok_rooms:
+    #         g_sects_fit_in_r = True
+    #         for s in g_sects:
+    #             if not self.fits_in_room_p(s, r):
+    #                 g_sects_fit_in_r = False
+    #                 break
+    #         if g_sects_fit_in_r:
+    #             self.rooms[r].extend(g_sects)
+    #             for s in g_sects:
+    #                 if s in self.unroomed_sects:
+    #                     self.unroomed_sects.remove(s)
+    #             for g in gaps:
+    #                 self.gaps.remove(g)
+    #             return True
+    #     # No room in ok_rooms, so let's try bad rooms.
+    #     if not prof_list.avoid_bad_rooms_by_splitting_gaps[prof]:
+    #         for r in prof_list.bad_rooms[prof]:
+    #             g_sects_fit_in_r = True
+    #             for s in g_sects:
+    #                 if not self.fits_in_room_p(s, r):
+    #                     g_sects_fit_in_r = False
+    #                     break
+    #             if g_sects_fit_in_r:
+    #                 self.rooms[r].extend(g_sects)
+    #                 for s in g_sects:
+    #                     if s in self.unroomed_sects:
+    #                         self.unroomed_sects.remove(s)
+    #                 for g in gaps:
+    #                     self.gaps.remove(g)
+    #                 return True
+    #     # If we got here without returning True, g_sects don't fit in any room
+    #     return False
+    def put_sect_in_a_room(self, sect: Section) -> bool:
+        # Attempts to put sect, which must be in unroomed_sects, in some room.
+        # Returns false if this is not possible (which shouldn't happen)
+        if sect not in self.unroomed_sects:
+            raise Exception("Section {} is not in unroomed_sects.")
+        prof = sect.prof
+        ok_rooms = [r for r in self.rooms.keys() if r not in prof_list.bad_rooms[prof]]
+        random.shuffle(ok_rooms)
+        # TODO: move room that prof is already in to front of list?
+        for r in ok_rooms:
+            if self.fits_in_room_p(sect, r):
+                self.rooms[r].append(sect)
+                self.unroomed_sects.remove(sect)
+                return True
+        for r in prof_list.bad_rooms[prof]:
+            if self.fits_in_room_p(sect, r):
+                self.rooms[r].append(sect)
+                self.unroomed_sects.remove(sect)
+                self.sects_in_bad_rooms.append(sect)
+                return True
+        return False
+    
+    def sort_rooms(self):
+        # put each list in rooms in chronological order
+        for k in self.rooms.keys():
+            self.rooms[k].sort(key = lambda s: s.time.start)
+        
+    def __repr__(self):
+        self.sort_rooms()
+        output = ""
+        keys = self.rooms.keys()
+        for k in keys:
+            output += "In room " + str(k) + ":\n"
+            for s in self.rooms[k]:
+                output += str(s) + "\n"
+        output += "Unassigned Sections: \n"
+        for s in self.unroomed_sects:
+            output += str(s) + "\n"
+        return output
+        
     # TODO: def put_sect_in_a_room(self, sect: Section) -> bool
     # TODO: def export_to_csv(self, file_name: str):
-    # TODO: def sort_rooms(self): # puts each list in rooms in chronological order
-    # TODO: def __repr__(self):
     # TODO: figure out how to avoid splitting half-online gaps
     # TODO: professor preferences!
         
-            
 
 
 # create the singletons sections, prof_list, filled by csv_importer
 sections, prof_list = import_schedule("test_schedule_sp_22.csv")
 gap_max = 60 # don't consider longer gaps, to encourage OH in CAS.
+closest = {1003: [1203, 1204, 1205, 1206, 1107, 1310, 1400, 1401, 1402, 1403, 1412, 1413, 1414, 1415, 1416, 1512, 8101],
+           1107:[1203, 1204, 1205, 1206, 1310, 1400, 1401, 1402, 1403, 1412, 1413, 1414, 1415, 1416, 1512, 8101],
+
+           1203: [1204, 1205, 1206, 1107, 1003, 1310, 1400, 1401, 1402, 1403, 1412, 1413, 1414, 1415, 1416, 1512, 8101],
+           1204:[1003, 1203, 1205, 1206, 1107, 1310, 1400, 1401, 1402, 1403, 1412, 1413, 1414, 1415, 1416, 1512, 8101],
+           1205:[1003, 1203, 1204, 1206, 1107, 1310, 1400, 1401, 1402, 1403, 1412, 1413, 1414, 1415, 1416, 1512, 8101],
+           1206:[1203, 1204, 1205, 1107, 1310, 1003, 1400, 1401, 1402, 1403, 1412, 1413, 1414, 1415, 1416, 1512, 8101],
+           1310:[1203, 1204, 1205, 1206, 1107, 1003, 1400, 1401, 1402, 1403, 1412, 1413, 1414, 1415, 1416, 1512, 8101],
+           1400:[1310, 1401, 1402, 1403, 1412, 1413, 1414, 1415, 1416, 1003, 1107, 1203, 1204, 1205, 1206, 1512, 8101], # TODO: Finish this, after looking at map
+           1401:[1003, 1107, 1203, 1204, 1205, 1206, 1310, 1400, 1402, 1403, 1412, 1413, 1414, 1415, 1416, 1512, 8101],
+           1402:[1003, 1107, 1203, 1204, 1205, 1206, 1310, 1400, 1401, 1403, 1412, 1413, 1414, 1415, 1416, 1512, 8101],
+           1403:[1003, 1107, 1203, 1204, 1205, 1206, 1310, 1400, 1401, 1402, 1412, 1413, 1414, 1415, 1416, 1512, 8101],
+           1412:[1003, 1107, 1203, 1204, 1205, 1206, 1310, 1400, 1401, 1402, 1403, 1413, 1414, 1415, 1416, 1512, 8101],
+           1413:[1003, 1107, 1203, 1204, 1205, 1206, 1310, 1400, 1401, 1402, 1403, 1412, 1414, 1415, 1416, 1512, 8101],
+           1414:[1003, 1107, 1203, 1204, 1205, 1206, 1310, 1400, 1401, 1402, 1403, 1412, 1413, 1415, 1416, 1512, 8101],
+           1415:[1003, 1107, 1203, 1204, 1205, 1206, 1310, 1400, 1401, 1402, 1403, 1412, 1413, 1414, 1416, 1512, 8101],
+           1416:[1003, 1107, 1203, 1204, 1205, 1206, 1310, 1400, 1401, 1402, 1403, 1412, 1413, 1414, 1415, 1512, 8101],
+           1512:[1003, 1107, 1203, 1204, 1205, 1206, 1310, 1400, 1401, 1402, 1403, 1412, 1413, 1414, 1415, 1416, 8101],
+           8101:[1003, 1107, 1203, 1204, 1205, 1206, 1310, 1400, 1401, 1402, 1403, 1412, 1413, 1414, 1415, 1416, 1512]}
 projectors = {1003:2,
+              1107:1, # 1107 has not been checked
               1203:1,
               1204:1,
               1205:1,
@@ -353,9 +640,10 @@ projectors = {1003:2,
               1416:1,
               1512:2,
               8101:1} # 8101 has not been checked!
-num_attempts = 1000
+num_attempts = 50
 schedules = [Schedule(sections) for i in range(num_attempts)]
 gap_set_order = list(range(len(schedules[0].gaps_partition)))
+print(schedules[0].gaps)
 failures = [False for i in range(num_attempts)]
 for i in range(len(schedules)):
     random.shuffle(gap_set_order)
@@ -366,6 +654,10 @@ for i in range(len(schedules)):
             print("In iteration ", i)
             print("Could not find room for gap set:", s)
             print(schedules[i].gaps_partition[s])
+    random.shuffle(schedules[i].unroomed_sects)
+    for s in schedules[i].unroomed_sects:
+        if not schedules[i].put_sect_in_a_room(s):
+            print("OH NO! Could not find a room for {} in iteration {}".format(s,i))
 
 successes = [i for i in range(len(failures)) if failures[i]==False]
 print(successes)
