@@ -429,7 +429,8 @@ class Schedule:
                 if s_fits_in_r == False:
                     g_sects_that_dont_fit[r].append(s)
                 if type(s_fits_in_r) == list:
-                    online_sects_to_kick[r].extend(s_fits_in_r)
+                    # set union | avoids repetition
+                    online_sects_to_kick[r] = list(set(online_sects_to_kick[r]) | set(s_fits_in_r))
         # if both kick_online_ok and split_gaps_ok, prioritize no_split_gaps.
         # make list (lsdf) of room numbers tied for least number of sects that don't fit
         # find the chosen_r in lsdf such that online_sects_to_kick[chosen_r] is minimized.
@@ -448,6 +449,8 @@ class Schedule:
         if not split_gaps_ok and len(g_sects_that_dont_fit[chosen_r]) != 0:
             return False
         for s in online_sects_to_kick[chosen_r]:
+            print(chosen_r, s)
+            print(self.rooms[chosen_r])
             self.online_sects_kicked.append(s)
             self.rooms[chosen_r].remove(s)
             self.unroomed_sects.append(s)
@@ -455,7 +458,7 @@ class Schedule:
             for g in gaps:
                 if (s == g.first or s == g.second) \
                   and not g.first.online and not g.second.online:
-                    self.split_in_person_gaps.append(s)
+                    self.split_in_person_gaps.append(g)
         for s in g_sects:
             if s not in g_sects_that_dont_fit[chosen_r]:
                 self.rooms[chosen_r].append(s)
@@ -568,9 +571,9 @@ class Schedule:
                         "Online":str(s.online), "Room":"No Room"}
                 time = s.time.csv_repr()
                 writer.writerow(row | time)
+            f.write("{} sections in bad rooms.\n".format(str(len(self.sects_in_bad_rooms))))
+            f.write("{} split in-person gaps.".format(str(len(self.split_in_person_gaps))))
 
-    # TODO: professor preferences!
-        
 
 
 gap_max = 60 # don't consider longer gaps, to encourage OH in CAS.
@@ -631,18 +634,21 @@ for i in range(len(schedules)):
     for s in gap_set_order:
         schedules[i].put_gaps_in_a_room(schedules[i].gaps_partition[s])
     random.shuffle(schedules[i].unroomed_sects)
+    sched_ok = True
     for s in list(schedules[i].unroomed_sects):
         if not schedules[i].put_sect_in_a_room(s):
-            print("OH NO! Could not find a room for {} in iteration {}".format(s,i))
-    schedules[i].export_to_csv("output_" + str(i) + ".csv")
-    print("In schedule " + str(i) + ", sects in bad rooms: " +\
-          str(len(schedules[i].sects_in_bad_rooms)))
-    print(schedules[i].sects_in_bad_rooms)
-    print("Split in-person gaps: " + str(len(schedules[i].split_in_person_gaps)))
-    print(schedules[i].split_in_person_gaps)
-    print("Online sections kicked:")
-    print(schedules[i].online_sects_kicked)
-    print("\n")
+            print("OH NO! Could not find a room for {} in iteration {}. Aborting.".format(s,i))
+            sched_ok = False
+    if sched_ok:
+        schedules[i].export_to_csv("output_" + str(i) + ".csv")
+        print("In schedule " + str(i) + ", sects in bad rooms: " +\
+            str(len(schedules[i].sects_in_bad_rooms)))
+        print(schedules[i].sects_in_bad_rooms)
+        print("Split in-person gaps: " + str(len(schedules[i].split_in_person_gaps)))
+        print(schedules[i].split_in_person_gaps)
+        print("Online sections kicked:")
+        print(schedules[i].online_sects_kicked)
+        print("\n")
     
 # successes = [i for i in range(len(failures)) if failures[i]==False]
 # print(successes)
