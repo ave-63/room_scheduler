@@ -11,6 +11,7 @@ import os
 #        - Whole process must be done before picking session and certain galley due date?
 #        - import_preferences() strings must be changed if google form changes at all.
 # TODO: figure out how to recognize online classes from csv
+# TODO: split_in_person_gaps has some duplicate gaps. Fix this!
 
 def import_preferences(csv_file):
     # Do this after import_schedule.
